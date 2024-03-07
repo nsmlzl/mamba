@@ -102,8 +102,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     // Set the pointers and strides.
     params.u_ptr = u.data_ptr();
     params.x_in_ptr = has_x_in ? x_in.data_ptr() : nullptr;
-    params.x_in_ptr = u.data_ptr();
-    params.x_in_batch_stride = 0;
     params.delta_ptr = delta.data_ptr();
     params.A_ptr = A.data_ptr();
     params.B_ptr = B.data_ptr();
@@ -277,6 +275,16 @@ selective_scan_fwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
     CHECK_SHAPE(u, batch_size, dim, seqlen);
     CHECK_SHAPE(delta, batch_size, dim, seqlen);
     CHECK_SHAPE(A, dim, dstate);
+
+    at::Tensor x_in;
+    const bool has_x_in = x_in_.has_value();
+    if (has_x_in) {
+        x_in = x_in_.value();
+        TORCH_CHECK(x_in.is_cuda());
+        TORCH_CHECK(x_in.scalar_type() == input_type);
+        CHECK_SHAPE(x_in, batch_size, dim, dstate);
+    }
+
     if (!is_variable_B) {
         CHECK_SHAPE(B, dim, dstate);
     } else {
@@ -315,15 +323,6 @@ selective_scan_fwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
         TORCH_CHECK(z.stride(-1) == 1 || z.size(-1) == 1);
         CHECK_SHAPE(z, batch_size, dim, seqlen);
         out_z = torch::empty_like(z);
-    }
-
-    at::Tensor x_in;
-    const bool has_x_in = x_in_.has_value();
-    if (has_x_in) {
-        x_in = x_in_.value();
-        TORCH_CHECK(x_in.is_cuda());
-        // TODO
-        // CHECK_SHAPE(x_in, ...);
     }
 
     const int n_chunks = (seqlen + 2048 - 1) / 2048;

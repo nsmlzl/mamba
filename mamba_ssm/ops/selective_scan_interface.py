@@ -21,8 +21,6 @@ class SelectiveScanFn(torch.autograd.Function):
         if x_in is not None:
             if x_in.stride(-1) != 1:
                 x_in = x_in.contiguous()
-        #else:
-            #x_in = torch.empty(0, dtype=u.dtype).cuda().contiguous()
         if delta.stride(-1) != 1:
             delta = delta.contiguous()
         if D is not None:

@@ -99,6 +99,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int group_id = dim_id / (params.dim_ngroups_ratio);
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
         + dim_id * kNRows * params.u_d_stride;
+    // correct????
+    input_t *x_in = nullptr;
+    if (params.x_in_ptr != nullptr) {
+        x_in = reinterpret_cast<input_t *>(params.x_in_ptr) + batch_id * params.x_in_batch_stride
+            + dim_id * kNRows * params.x_in_d_stride;
+    }
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
         + dim_id * kNRows * params.delta_d_stride;
     weight_t *A = reinterpret_cast<weight_t *>(params.A_ptr) + dim_id * kNRows * params.A_d_stride;

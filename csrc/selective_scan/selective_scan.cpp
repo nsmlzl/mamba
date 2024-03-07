@@ -68,6 +68,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const bool is_variable_C,
                         // device pointers
                         const at::Tensor u,
+                        const at::Tensor x_in,
                         const at::Tensor delta,
                         const at::Tensor A,
                         const at::Tensor B,
@@ -79,6 +80,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         void* delta_bias_ptr,
                         void* x_ptr,
                         bool has_z,
+                        bool has_x_in,
                         bool delta_softplus) {
 
     // Reset the parameters
@@ -99,6 +101,9 @@ void set_ssm_params_fwd(SSMParamsBase &params,
 
     // Set the pointers and strides.
     params.u_ptr = u.data_ptr();
+    params.x_in_ptr = has_x_in ? x_in.data_ptr() : nullptr;
+    params.x_in_ptr = u.data_ptr();
+    params.x_in_batch_stride = 0;
     params.delta_ptr = delta.data_ptr();
     params.A_ptr = A.data_ptr();
     params.B_ptr = B.data_ptr();
@@ -128,6 +133,13 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.C_dstate_stride = !is_variable_C ? C.stride(1) : C.stride(2);
     params.u_batch_stride = u.stride(0);
     params.u_d_stride = u.stride(1);
+    if (has_x_in) {
+        params.x_in_batch_stride = x_in.stride(0);
+        params.x_in_d_stride = x_in.stride(1);
+    } else {
+        params.x_in_batch_stride = 0;
+        params.x_in_d_stride = 0;
+    }
     params.delta_batch_stride = delta.stride(0);
     params.delta_d_stride = delta.stride(1);
     if (has_z) {
@@ -174,14 +186,15 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         bool has_z,
                         bool delta_softplus,
                         bool recompute_out_z) {
+    at::Tensor x_in = torch::empty(0);
     // Pass in "dout" instead of "out", we're not gonna use "out" unless we have z
     set_ssm_params_fwd(params, batch, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
-                       u, delta, A, B, C, has_z ? out : dout,
+                       u, x_in, delta, A, B, C, has_z ? out : dout,
                        has_z ? z : dout,
                        // If not recompute_out_z, pass dout instead of out_z.
                        // This won't be used by the bwd kernel
                        recompute_out_z ? out_z : dout,
-                       D_ptr, delta_bias_ptr, x_ptr, has_z, delta_softplus);
+                       D_ptr, delta_bias_ptr, x_ptr, has_z, false, delta_softplus);
     if (!recompute_out_z) { params.out_z_ptr = nullptr; }
 
     // Set the pointers and strides.
@@ -224,7 +237,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
 }
 
 std::vector<at::Tensor>
-selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
+selective_scan_fwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, const at::Tensor &delta,
                   const at::Tensor &A, const at::Tensor &B, const at::Tensor &C,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
@@ -304,6 +317,15 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
         out_z = torch::empty_like(z);
     }
 
+    at::Tensor x_in;
+    const bool has_x_in = x_in_.has_value();
+    if (has_x_in) {
+        x_in = x_in_.value();
+        TORCH_CHECK(x_in.is_cuda());
+        // TODO
+        // CHECK_SHAPE(x_in, ...);
+    }
+
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
     // const int n_chunks = (seqlen + 1024 - 1) / 1024;
     // at::Tensor out = torch::empty_like(u);
@@ -314,11 +336,11 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
 
     SSMParamsBase params;
     set_ssm_params_fwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
-                       u, delta, A, B, C, out, z, out_z,
+                       u, x_in, delta, A, B, C, out, z, out_z,
                        D_.has_value() ? D_.value().data_ptr() : nullptr,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
                        x.data_ptr(),
-                       has_z,
+                       has_z, has_x_in,
                        delta_softplus);
 
     // Otherwise the kernel will be launched from cuda:0 device

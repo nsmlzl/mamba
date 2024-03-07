@@ -45,6 +45,8 @@ struct SSMParamsBase {
     index_t C_group_stride;
     index_t u_batch_stride;
     index_t u_d_stride;
+    index_t x_in_batch_stride;
+    index_t x_in_d_stride;
     index_t delta_batch_stride;
     index_t delta_d_stride;
     index_t z_batch_stride;
@@ -64,6 +66,7 @@ struct SSMParamsBase {
     void *__restrict__ delta_bias_ptr;
     void *__restrict__ out_ptr;
     void *__restrict__ x_ptr;
+    void *__restrict__ x_in_ptr;
     void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
 };

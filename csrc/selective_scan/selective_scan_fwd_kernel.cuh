@@ -99,7 +99,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int group_id = dim_id / (params.dim_ngroups_ratio);
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
         + dim_id * kNRows * params.u_d_stride;
-    // correct????
     input_t *x_in = nullptr;
     if (params.x_in_ptr != nullptr) {
         x_in = reinterpret_cast<input_t *>(params.x_in_ptr) + batch_id * params.x_in_batch_stride
@@ -244,9 +243,17 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // If we use WARP_SCAN then all lane 0 of all warps (not just thread 0) needs to read
                     running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.f, 0.f);
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float2(1.f, 0.f);
+                    if (chunk == 0 && threadIdx.x == 0 && x_in != nullptr) {
+                        running_prefix = make_float2(1.f, x_in[state_idx]);
+                    }
                 } else {
                     running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float4(1.f, 0.f, 0.f, 0.f);
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
+                    if (chunk == 0 && threadIdx.x == 0 && x_in != nullptr) {
+                        // TODO set hidden state when complex
+                        raise NotImplementedError("Setting the hidden state for complex state is not yet supported.")
+                        running_prefix = make_float4(1.f, 0.f, x_in[state_idx][0], x_in[state_idx][1]);
+                    }
                 }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 Ktraits::BlockScanT(smem_scan).InclusiveScan(

@@ -146,6 +146,81 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     if has_delta_bias:
         assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
 
+@pytest.mark.parametrize('wtype', [torch.float32])
+@pytest.mark.parametrize('itype', [torch.float32])
+@pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
+@pytest.mark.parametrize("return_last_state", [True])
+@pytest.mark.parametrize('delta_softplus', [True])
+def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state, delta_softplus):
+    device = 'cuda'
+    rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 3e-2, 5e-2
+    rtolw, atolw = (1e-3, 1e-3)
+
+    torch.random.manual_seed(0)
+    batch_size = 2
+    dim = 4
+    dstate = 8
+
+    A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype)).requires_grad_()
+    B = torch.randn(batch_size, dstate, seqlen, device=device, dtype=itype,
+                    requires_grad=True)
+    C = torch.randn(batch_size, dstate, seqlen, device=device, dtype=itype,
+                    requires_grad=True)
+    D = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+    z=None
+    u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype, requires_grad=True)
+    delta = (0.5 * torch.rand(batch_size, dim, seqlen, device=device, dtype=itype)).requires_grad_()
+    delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)).requires_grad_()
+
+    # tensors for selective scan with hidden state init
+    A_hsi = A.detach().clone().requires_grad_()
+    B_hsi_0 = B[:,:,:seqlen//2].detach().clone().requires_grad_()
+    B_hsi_1 = B[:,:,seqlen//2:].detach().clone().requires_grad_()
+    C_hsi_0 = C[:,:,:seqlen//2].detach().clone().requires_grad_()
+    C_hsi_1 = C[:,:,seqlen//2:].detach().clone().requires_grad_()
+    D_hsi = D.detach().clone().requires_grad_()
+    z_hsi = z
+    u_hsi_0 = u[:,:,:seqlen//2].detach().clone().requires_grad_()
+    u_hsi_1 = u[:,:,seqlen//2:].detach().clone().requires_grad_()
+    delta_hsi_0 = delta[:,:,:seqlen//2].detach().clone().requires_grad_()
+    delta_hsi_1 = delta[:,:,seqlen//2:].detach().clone().requires_grad_()
+    delta_bias_hsi = delta_bias.detach().clone().requires_grad_()
+
+    # compute output with single recursive computation (reference)
+    out, last_state = selective_scan_fn(
+        u, delta, A, B, C, D, z=z,
+        delta_bias=delta_bias, delta_softplus=delta_softplus,
+        return_last_state=return_last_state
+    )
+    print(last_state)
+    print(last_state.shape)
+
+    # compute output with two recursive computations; second computation is initialized
+    # with hidden state of previous computation
+    out_hsi_0, last_state_hsi_0 = selective_scan_fn(
+        u_hsi_0, delta_hsi_0, A_hsi, B_hsi_0, C_hsi_0, D_hsi, z=z_hsi,
+        delta_bias=delta_bias_hsi, delta_softplus=delta_softplus,
+        return_last_state=return_last_state
+    )
+    out_hsi_1, last_state_hsi_1 = selective_scan_fn(
+        u_hsi_1, delta_hsi_1, A_hsi, B_hsi_1, C_hsi_1, D_hsi, z=z_hsi,
+        delta_bias=delta_bias_hsi, delta_softplus=delta_softplus,
+        x_in=last_state_hsi_0, return_last_state=return_last_state
+    )
+    # join output into single tensor
+    out_hsi = torch.cat((out_hsi_0, out_hsi_1), dim=2)
+
+    print(out[0,0,1], out_hsi_0[0,0,1])
+    print(out[0,0,65], out_hsi_1[0,0,1])
+    print(out[0,0,-1], out_hsi_1[0,0,-1])
+    print(out[1,1,-1], out_hsi_1[1,1,-1])
+
+    assert out.shape == out_hsi.shape
+    assert torch.allclose(out, out_hsi, rtol=rtol, atol=atol)
+    assert torch.allclose(last_state, last_state_hsi_1, rtol=rtol, atol=atol)
+
 
 @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 # @pytest.mark.parametrize('wtype', [torch.complex64])

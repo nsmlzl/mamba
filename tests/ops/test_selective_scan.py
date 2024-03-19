@@ -146,7 +146,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     if has_delta_bias:
         assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
 
-@pytest.mark.parametrize('wtype', [torch.float32])
+@pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 #@pytest.mark.parametrize('itype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('itype', [torch.float32])
 @pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
@@ -163,11 +163,12 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
     batch_size = 2
     dim = 4
     dstate = 8
+    is_complex = wtype == torch.complex64
 
     A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype)).requires_grad_()
-    B = torch.randn(batch_size, dstate, seqlen, device=device, dtype=itype,
+    B = torch.randn(batch_size, dstate, seqlen if not is_complex else seqlen * 2, device=device, dtype=itype,
                     requires_grad=True)
-    C = torch.randn(batch_size, dstate, seqlen, device=device, dtype=itype,
+    C = torch.randn(batch_size, dstate, seqlen if not is_complex else seqlen * 2, device=device, dtype=itype,
                     requires_grad=True)
     D = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     z=None
@@ -177,16 +178,16 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
 
     # tensors for selective scan with hidden state init
     A_hsi = A.detach().clone().requires_grad_()
-    B_hsi_0 = B[:,:,:seqlen//2].detach().clone().requires_grad_()
-    B_hsi_1 = B[:,:,seqlen//2:].detach().clone().requires_grad_()
-    C_hsi_0 = C[:,:,:seqlen//2].detach().clone().requires_grad_()
-    C_hsi_1 = C[:,:,seqlen//2:].detach().clone().requires_grad_()
+    B_hsi_0 = B[:,:,: B.size(2)//2].detach().clone().requires_grad_()
+    B_hsi_1 = B[:,:,B.size(2)//2:].detach().clone().requires_grad_()
+    C_hsi_0 = C[:,:,:C.size(2)//2].detach().clone().requires_grad_()
+    C_hsi_1 = C[:,:,C.size(2)//2:].detach().clone().requires_grad_()
     D_hsi = D.detach().clone().requires_grad_()
     z_hsi = z
-    u_hsi_0 = u[:,:,:seqlen//2].detach().clone().requires_grad_()
-    u_hsi_1 = u[:,:,seqlen//2:].detach().clone().requires_grad_()
-    delta_hsi_0 = delta[:,:,:seqlen//2].detach().clone().requires_grad_()
-    delta_hsi_1 = delta[:,:,seqlen//2:].detach().clone().requires_grad_()
+    u_hsi_0 = u[:,:,:u.size(2)//2].detach().clone().requires_grad_()
+    u_hsi_1 = u[:,:,u.size(2)//2:].detach().clone().requires_grad_()
+    delta_hsi_0 = delta[:,:,:delta.size(2)//2].detach().clone().requires_grad_()
+    delta_hsi_1 = delta[:,:,delta.size(2)//2:].detach().clone().requires_grad_()
     delta_bias_hsi = delta_bias.detach().clone().requires_grad_()
 
     # compute output with single recursive computation (reference)

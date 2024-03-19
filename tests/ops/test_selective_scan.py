@@ -147,6 +147,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
         assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
 
 @pytest.mark.parametrize('wtype', [torch.float32])
+#@pytest.mark.parametrize('itype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('itype', [torch.float32])
 @pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
 @pytest.mark.parametrize("return_last_state", [True])
@@ -194,8 +195,6 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
         delta_bias=delta_bias, delta_softplus=delta_softplus,
         return_last_state=return_last_state
     )
-    print(last_state)
-    print(last_state.shape)
 
     # compute output with two recursive computations; second computation is initialized
     # with hidden state of previous computation
@@ -212,10 +211,10 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
     # join output into single tensor
     out_hsi = torch.cat((out_hsi_0, out_hsi_1), dim=2)
 
-    print(out[0,0,1], out_hsi_0[0,0,1])
-    print(out[0,0,65], out_hsi_1[0,0,1])
-    print(out[0,0,-1], out_hsi_1[0,0,-1])
-    print(out[1,1,-1], out_hsi_1[1,1,-1])
+    print(out[0,0,1], out_hsi[0,0,1])
+    print(out[0,0,65], out_hsi[0,0,65])
+    print(out[0,0,-1], out_hsi[0,0,-1])
+    print(out[1,1,-1], out_hsi[1,1,-1])
 
     assert out.shape == out_hsi.shape
     assert torch.allclose(out, out_hsi, rtol=rtol, atol=atol)

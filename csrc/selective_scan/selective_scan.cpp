@@ -281,7 +281,7 @@ selective_scan_fwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
     if (has_x_in) {
         x_in = x_in_.value();
         TORCH_CHECK(x_in.is_cuda());
-        TORCH_CHECK(x_in.scalar_type() == input_type);
+        TORCH_CHECK(x_in.scalar_type() == weight_type);
         CHECK_SHAPE(x_in, batch_size, dim, dstate);
     }
 

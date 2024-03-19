@@ -251,8 +251,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
                     if (chunk == 0 && threadIdx.x == 0 && x_in != nullptr) {
                         // TODO set hidden state when complex
-                        raise NotImplementedError("Setting the hidden state for complex state is not yet supported.")
-                        running_prefix = make_float4(1.f, 0.f, x_in[state_idx][0], x_in[state_idx][1]);
+                        printf("Setting the hidden state for complex state is not yet supported.");
+                        running_prefix = make_float4(1.f, 0.f, x_in[state_idx], 0.f);
                     }
                 }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);

@@ -9,12 +9,16 @@
 #include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
 
 #include <cub/block/block_load.cuh>
-#include <cub/block/block_store.cuh>
-#include <cub/block/block_scan.cuh>
+// #include <cub/block/block_store.cuh>
+// #include <cub/block/block_scan.cuh>
+#include <hipcub/block/block_store.hpp>
+#include <hipcub/block/block_scan.hpp>
 
 #include "selective_scan.h"
 #include "selective_scan_common.h"
 #include "static_switch.h"
+
+namespace cub = hipcub;
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
@@ -30,7 +34,7 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kNRows = kNRows_;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
-    static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
+    static constexpr int kNElts = kNBytes == 4 ? 4 : rocm_utils::min(8, kNItems);
     static_assert(kNItems % kNElts == 0);
     static constexpr int kNLoads = kNItems / kNElts;
     static constexpr bool kIsComplex = std::is_same_v<weight_t, complex_t>;
@@ -55,12 +59,18 @@ struct Selective_Scan_fwd_kernel_traits {
     // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING_MEMOIZE>;
     // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING>;
     using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_WARP_SCANS>;
-    static constexpr int kSmemIOSize = std::max({sizeof(typename BlockLoadT::TempStorage),
-                                                 sizeof(typename BlockLoadVecT::TempStorage),
-                                                 (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
-                                                 (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
-                                                 sizeof(typename BlockStoreT::TempStorage),
-                                                 sizeof(typename BlockStoreVecT::TempStorage)});
+    // static constexpr int kSmemIOSize = std::max({sizeof(typename BlockLoadT::TempStorage),
+    //                                              sizeof(typename BlockLoadVecT::TempStorage),
+    //                                              (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
+    //                                              (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
+    //                                              sizeof(typename BlockStoreT::TempStorage),
+    //                                              sizeof(typename BlockStoreVecT::TempStorage)});
+    static constexpr int kSmemIOSize = rocm_utils::max(sizeof(typename BlockLoadT::TempStorage),
+                                       rocm_utils::max(sizeof(typename BlockLoadVecT::TempStorage),
+                                       rocm_utils::max((int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
+                                       rocm_utils::max((int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
+                                       rocm_utils::max(sizeof(typename BlockStoreT::TempStorage),
+                                       sizeof(typename BlockStoreVecT::TempStorage))))));
     static constexpr int kSmemSize = kSmemIOSize + sizeof(typename BlockScanT::TempStorage);
 };
 
@@ -243,7 +253,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
                 }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
-                Ktraits::BlockScanT(smem_scan).InclusiveScan(
+                typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
                 // There's a syncthreads in the scan op, so we don't need to sync here.
@@ -319,7 +329,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                     auto kernel = &selective_scan_fwd_kernel<Ktraits>;
                     if (kSmemSize >= 48 * 1024) {
                         C10_CUDA_CHECK(cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                            (void *)kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
                     }
                     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -331,13 +341,18 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
-    if (params.seqlen <= 128) {
-        selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 256) {
-        selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 512) {
-        selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 1024) {
+    //if (params.seqlen <= 128) {
+    //    // selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
+    //    selective_scan_fwd_launch<64, 2, input_t, weight_t>(params, stream);
+    //} else if (params.seqlen <= 256) {
+    // if (params.seqlen <= 256) {
+    //     // selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
+    //     selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+    // } else if (params.seqlen <= 512) {
+    //     // selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
+    //     selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+    // } else if (params.seqlen <= 1024) {
+    if (params.seqlen <= 1024) {
         selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
     } else {
         selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);

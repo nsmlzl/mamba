@@ -162,6 +162,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         const bool is_variable_C,
                         // device pointers
                         const at::Tensor u,
+                        const at::Tensor x_in,
                         const at::Tensor delta,
                         const at::Tensor A,
                         const at::Tensor B,
@@ -182,9 +183,9 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         void* dD_ptr,
                         void* ddelta_bias_ptr,
                         bool has_z,
+                        bool has_x_in,
                         bool delta_softplus,
                         bool recompute_out_z) {
-    at::Tensor x_in = torch::empty(0);
     // Pass in "dout" instead of "out", we're not gonna use "out" unless we have z
     set_ssm_params_fwd(params, batch, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
                        u, x_in, delta, A, B, C, has_z ? out : dout,
@@ -192,7 +193,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                        // If not recompute_out_z, pass dout instead of out_z.
                        // This won't be used by the bwd kernel
                        recompute_out_z ? out_z : dout,
-                       D_ptr, delta_bias_ptr, x_ptr, has_z, false, delta_softplus);
+                       D_ptr, delta_bias_ptr, x_ptr, has_z, has_x_in, delta_softplus);
     if (!recompute_out_z) { params.out_z_ptr = nullptr; }
 
     // Set the pointers and strides.
@@ -357,7 +358,7 @@ selective_scan_fwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
 }
 
 std::vector<at::Tensor>
-selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
+selective_scan_bwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, const at::Tensor &delta,
                   const at::Tensor &A, const at::Tensor &B, const at::Tensor &C,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
@@ -405,6 +406,16 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     CHECK_SHAPE(u, batch_size, dim, seqlen);
     CHECK_SHAPE(delta, batch_size, dim, seqlen);
     CHECK_SHAPE(A, dim, dstate);
+
+    at::Tensor x_in;
+    const bool has_x_in = x_in_.has_value();
+    if (has_x_in) {
+        x_in = x_in_.value();
+        TORCH_CHECK(x_in.is_cuda());
+        TORCH_CHECK(x_in.scalar_type() == weight_type);
+        CHECK_SHAPE(x_in, batch_size, dim, dstate);
+    }
+
     if (!is_variable_B) {
         CHECK_SHAPE(B, dim, dstate);
     } else {
@@ -488,14 +499,14 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
 
     SSMParamsBwd params;
     set_ssm_params_bwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
-                       u, delta, A, B, C, z, out, out_z,
+                       u, x_in, delta, A, B, C, z, out, out_z,
                        D_.has_value() ? D_.value().data_ptr() : nullptr,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
                        x_.has_value() ? x_.value().data_ptr() : nullptr,
                        dout, du, ddelta, dA, dB, dC, dz,
                        D_.has_value() ? dD.data_ptr() : nullptr,
                        delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
-                       has_z, delta_softplus, recompute_out_z);
+                       has_z, has_x_in, delta_softplus, recompute_out_z);
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing

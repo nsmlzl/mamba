@@ -113,6 +113,11 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     const int group_id = dim_id / (params.dim_ngroups_ratio);
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
         + dim_id * params.u_d_stride;
+    weight_t *x_in = nullptr;
+    if (params.x_in_ptr != nullptr) {
+        x_in = reinterpret_cast<weight_t *>(params.x_in_ptr) + batch_id * params.x_in_batch_stride
+            + dim_id * params.x_in_d_stride;
+    }
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
         + dim_id * params.delta_d_stride;
     input_t *dout = reinterpret_cast<input_t *>(params.dout_ptr) + batch_id * params.dout_batch_stride
@@ -262,6 +267,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     : smem_delta_a[threadIdx.x + 1 + 2 * MAX_DSTATE];
                 // Initialize running total
                 scan_t running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? x[(chunk - 1) * params.dstate + state_idx] : make_float2(1.f, 0.f);
+                if (chunk == 0 && threadIdx.x == 0 && x_in != nullptr) running_prefix.y = x_in[state_idx];
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
@@ -355,6 +361,10 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 thread_reverse_data[kNItems - 1].y = -delta_a_exp.imag_;
                 // Initialize running total
                 scan_t running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? x[(chunk - 1) * params.dstate + state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
+                if (chunk == 0 && threadIdx.x == 0 && x_in != nullptr) {
+                    running_prefix.z = x_in[state_idx].real_;
+                    running_prefix.w = x_in[state_idx].imag_;
+                }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op

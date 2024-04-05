@@ -177,18 +177,21 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
     delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)).requires_grad_()
 
     # tensors for selective scan with hidden state init
-    A_hsi = A.detach().clone().requires_grad_()
+    A_hsi_0 = A.detach().clone().requires_grad_()
+    A_hsi_1 = A.detach().clone().requires_grad_()
     B_hsi_0 = B[:,:,: B.size(2)//2].detach().clone().requires_grad_()
     B_hsi_1 = B[:,:,B.size(2)//2:].detach().clone().requires_grad_()
     C_hsi_0 = C[:,:,:C.size(2)//2].detach().clone().requires_grad_()
     C_hsi_1 = C[:,:,C.size(2)//2:].detach().clone().requires_grad_()
-    D_hsi = D.detach().clone().requires_grad_()
+    D_hsi_0 = D.detach().clone().requires_grad_()
+    D_hsi_1 = D.detach().clone().requires_grad_()
     z_hsi = z
     u_hsi_0 = u[:,:,:u.size(2)//2].detach().clone().requires_grad_()
     u_hsi_1 = u[:,:,u.size(2)//2:].detach().clone().requires_grad_()
     delta_hsi_0 = delta[:,:,:delta.size(2)//2].detach().clone().requires_grad_()
     delta_hsi_1 = delta[:,:,delta.size(2)//2:].detach().clone().requires_grad_()
-    delta_bias_hsi = delta_bias.detach().clone().requires_grad_()
+    delta_bias_hsi_0 = delta_bias.detach().clone().requires_grad_()
+    delta_bias_hsi_1 = delta_bias.detach().clone().requires_grad_()
 
     # compute output with single recursive computation (reference)
     out, last_state = selective_scan_fn(
@@ -200,14 +203,15 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
     # compute output with two recursive computations; second computation is initialized
     # with hidden state of previous computation
     out_hsi_0, last_state_hsi_0 = selective_scan_fn(
-        u_hsi_0, delta_hsi_0, A_hsi, B_hsi_0, C_hsi_0, D_hsi, z=z_hsi,
-        delta_bias=delta_bias_hsi, delta_softplus=delta_softplus,
+        u_hsi_0, delta_hsi_0, A_hsi_0, B_hsi_0, C_hsi_0, D_hsi_0, z=z_hsi,
+        delta_bias=delta_bias_hsi_0, delta_softplus=delta_softplus,
         return_last_state=return_last_state
     )
+
     out_hsi_1, last_state_hsi_1 = selective_scan_fn(
-        u_hsi_1, delta_hsi_1, A_hsi, B_hsi_1, C_hsi_1, D_hsi, z=z_hsi,
-        delta_bias=delta_bias_hsi, delta_softplus=delta_softplus,
-        x_in=last_state_hsi_0, return_last_state=return_last_state
+        u_hsi_1, delta_hsi_1, A_hsi_1, B_hsi_1, C_hsi_1, D_hsi_1, z=z_hsi,
+        delta_bias=delta_bias_hsi_1, delta_softplus=delta_softplus,
+        x_in=last_state_hsi_0.detach().clone(), return_last_state=return_last_state
     )
     # join output into single tensor
     out_hsi = torch.cat((out_hsi_0, out_hsi_1), dim=2)
@@ -220,6 +224,26 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
     assert out.shape == out_hsi.shape
     assert torch.allclose(out, out_hsi, rtol=rtol, atol=atol)
     assert torch.allclose(last_state, last_state_hsi_1, rtol=rtol, atol=atol)
+
+
+    # check backward path
+    g = torch.randn_like(out)
+    g_hsi_0 = g[:,:,: g.size(2)//2].detach().clone()
+    g_hsi_1 = g[:,:,g.size(2)//2 :].detach().clone()
+
+    out.backward(g)
+    out_hsi_1.backward(g_hsi_1)
+    out_hsi_0.backward(g_hsi_0)
+
+    assert torch.allclose(u.grad[:,:,u.size(2)//2:], u_hsi_1.grad, rtol=rtol, atol=atol)
+    assert torch.allclose(delta.grad[:,:,delta.size(2)//2:], delta_hsi_1.grad, rtol=rtol, atol=atol)
+    # TODO unable to test A
+    assert torch.allclose(B.grad[:,:,B.size(2)//2:], B_hsi_1.grad, rtol=rtol, atol=atol)
+    assert torch.allclose(C.grad[:,:,C.size(2)//2:], C_hsi_1.grad, rtol=rtol, atol=atol)
+    # TODO unable to test D
+    # TODO unable to test delta_bias
+
+    raise NotImplementedError()
 
 
 @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])

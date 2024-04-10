@@ -4,19 +4,18 @@
 
 #pragma once
 
-// #include <cub/config.cuh>
-#include <hipcub/config.hpp>
+#ifndef USE_ROCM
+#include <cub/config.cuh>
 
-// #include <cub/util_ptx.cuh>
-// #include <cub/util_type.cuh>
-// #include <cub/block/block_raking_layout.cuh>
-#include <hipcub/util_ptx.hpp>
-#include <hipcub/util_type.hpp>
-#include <hipcub/block/block_raking_layout.hpp>
+#include <cub/util_ptx.cuh>
+#include <cub/util_type.cuh>
+#include <cub/block/block_raking_layout.cuh>
 // #include <cub/detail/uninitialized_copy.cuh>
-#include "uninitialized_copy.cuh"
-
+#else
+#include <hipcub/hipcub.hpp>
 namespace cub = hipcub;
+#endif
+#include "uninitialized_copy.cuh"
 
 /**
  * Perform a reverse sequential reduction over \p LENGTH elements of the \p input array.  The aggregate is returned.

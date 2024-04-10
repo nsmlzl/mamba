@@ -4,12 +4,17 @@
 
 #pragma once
 
-// #include <cuda_bf16.h>
-// #include <cuda_fp16.h>
+#ifndef USE_ROCM
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#else
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
+#endif
+
 #include <c10/util/complex.h>  // For scalar_value_type
 
+#ifdef USE_ROCM
 namespace rocm_utils {
 
 template <typename T>
@@ -25,6 +30,7 @@ __host__ __device__ constexpr T max(T x, T y)
 }
 
 } // namespace rocm_utils
+#endif
 
 #define MAX_DSTATE 256
 

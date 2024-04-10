@@ -27,11 +27,13 @@
 
 #pragma once
 
-// #include <cub/config.cuh>
+#ifndef USE_ROCM
+#include <cub/config.cuh>
+#include <cuda/std/type_traits>
+#else
 #include <hipcub/config.hpp>
-
-// #include <cuda/std/type_traits>
 #include <type_traits>
+#endif
 
 
 namespace detail

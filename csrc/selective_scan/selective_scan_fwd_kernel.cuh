@@ -8,17 +8,18 @@
 #include <c10/util/Half.h>
 #include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
 
+#ifndef USE_ROCM
 #include <cub/block/block_load.cuh>
-// #include <cub/block/block_store.cuh>
-// #include <cub/block/block_scan.cuh>
-#include <hipcub/block/block_store.hpp>
-#include <hipcub/block/block_scan.hpp>
+#include <cub/block/block_store.cuh>
+#include <cub/block/block_scan.cuh>
+#else
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#endif
 
 #include "selective_scan.h"
 #include "selective_scan_common.h"
 #include "static_switch.h"
-
-namespace cub = hipcub;
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
@@ -34,7 +35,11 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kNRows = kNRows_;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
+#ifndef USE_ROCM
+    static constexpr int kNElts = kNBytes == 4 ? 4 : ::min(8, kNItems);
+#else
     static constexpr int kNElts = kNBytes == 4 ? 4 : rocm_utils::min(8, kNItems);
+#endif
     static_assert(kNItems % kNElts == 0);
     static constexpr int kNLoads = kNItems / kNElts;
     static constexpr bool kIsComplex = std::is_same_v<weight_t, complex_t>;
@@ -59,18 +64,21 @@ struct Selective_Scan_fwd_kernel_traits {
     // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING_MEMOIZE>;
     // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING>;
     using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_WARP_SCANS>;
-    // static constexpr int kSmemIOSize = std::max({sizeof(typename BlockLoadT::TempStorage),
-    //                                              sizeof(typename BlockLoadVecT::TempStorage),
-    //                                              (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
-    //                                              (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
-    //                                              sizeof(typename BlockStoreT::TempStorage),
-    //                                              sizeof(typename BlockStoreVecT::TempStorage)});
+#ifndef USE_ROCM
+    static constexpr int kSmemIOSize = std::max({sizeof(typename BlockLoadT::TempStorage),
+                                                 sizeof(typename BlockLoadVecT::TempStorage),
+                                                 (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
+                                                 (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
+                                                 sizeof(typename BlockStoreT::TempStorage),
+                                                 sizeof(typename BlockStoreVecT::TempStorage)});
+#else
     static constexpr int kSmemIOSize = rocm_utils::max(sizeof(typename BlockLoadT::TempStorage),
                                        rocm_utils::max(sizeof(typename BlockLoadVecT::TempStorage),
                                        rocm_utils::max((int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
                                        rocm_utils::max((int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
                                        rocm_utils::max(sizeof(typename BlockStoreT::TempStorage),
                                        sizeof(typename BlockStoreVecT::TempStorage))))));
+#endif
     static constexpr int kSmemSize = kSmemIOSize + sizeof(typename BlockScanT::TempStorage);
 };
 
@@ -341,20 +349,27 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
-    //if (params.seqlen <= 128) {
-    //    // selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
-    //    selective_scan_fwd_launch<64, 2, input_t, weight_t>(params, stream);
-    //} else if (params.seqlen <= 256) {
-    // if (params.seqlen <= 256) {
-    //     // selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
-    //     selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
-    // } else if (params.seqlen <= 512) {
-    //     // selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
-    //     selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
-    // } else if (params.seqlen <= 1024) {
-    if (params.seqlen <= 1024) {
+#ifndef USE_ROCM
+    if (params.seqlen <= 128) {
+       selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
+    } else if (params.seqlen <= 256) {
+        selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
+    } else if (params.seqlen <= 512) {
+        selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
+    } else if (params.seqlen <= 1024) {
         selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
     } else {
         selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
     }
+#else
+    if (params.seqlen <= 256) {
+        selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+    } else if (params.seqlen <= 512) {
+        selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+    } else if (params.seqlen <= 1024) {
+        selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+    } else {
+        selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+    }
+#endif
 }

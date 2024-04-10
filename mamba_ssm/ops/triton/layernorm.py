@@ -16,6 +16,9 @@ import triton
 import triton.language as tl
 
 
+def _is_hip():
+    return torch.version.hip is not None
+
 def layer_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upcast=False):
     dtype = x.dtype
     if upcast:
@@ -48,15 +51,20 @@ def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upcast
     return out if not prenorm else (out, x)
 
 
+_AUTOTUNE_CONFIGS = [
+    triton.Config({}, num_warps=1),
+    triton.Config({}, num_warps=2),
+    triton.Config({}, num_warps=4),
+    triton.Config({}, num_warps=8),
+    triton.Config({}, num_warps=16),
+    triton.Config({}, num_warps=32),
+] if not _is_hip() else [
+    triton.Config({},),
+]
+
+
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32),
-    ],
+    configs=_AUTOTUNE_CONFIGS,
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
@@ -178,14 +186,7 @@ def _layer_norm_fwd(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32),
-    ],
+    configs=_AUTOTUNE_CONFIGS,
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})

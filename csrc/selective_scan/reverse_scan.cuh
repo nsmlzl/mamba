@@ -52,6 +52,7 @@ __device__ __forceinline__ T ThreadReverseScanInclusive(
         inclusive = scan_op(inclusive, input[i]);
         output[i] = inclusive;
     }
+    return inclusive;
 }
 
 /**

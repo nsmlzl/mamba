@@ -47,33 +47,51 @@ __host__ __device__ void uninitialized_copy(T *ptr, U &&val)
   new (ptr) T(::cuda::std::forward<U>(val));
 }
 #else
+#ifndef USE_ROCM
 template <typename T,
           typename U,
-          // typename ::cuda::std::enable_if<
+          typename ::cuda::std::enable_if<
+            ::cuda::std::is_trivially_copyable<T>::value,
+            int
+          >::type = 0>
+__host__ __device__ void uninitialized_copy(T *ptr, U &&val)
+{
+  *ptr = ::cuda::std::forward<U>(val);
+}
+
+template <typename T,
+         typename U,
+         typename ::cuda::std::enable_if<
+            !::cuda::std::is_trivially_copyable<T>::value,
+           int
+         >::type = 0>
+__host__ __device__ void uninitialized_copy(T *ptr, U &&val)
+{
+  new (ptr) T(::cuda::std::forward<U>(val));
+}
+#else
+template <typename T,
+          typename U,
           typename std::enable_if<
-            // ::cuda::std::is_trivially_copyable<T>::value,
             std::is_trivially_copyable<T>::value,
             int
           >::type = 0>
 __host__ __device__ void uninitialized_copy(T *ptr, U &&val)
 {
-  // *ptr = ::cuda::std::forward<U>(val);
   *ptr = std::forward<U>(val);
 }
 
 template <typename T,
          typename U,
-        //  typename ::cuda::std::enable_if<
          typename std::enable_if<
-           //  !::cuda::std::is_trivially_copyable<T>::value,
            !std::is_trivially_copyable<T>::value,
            int
          >::type = 0>
 __host__ __device__ void uninitialized_copy(T *ptr, U &&val)
 {
-  // new (ptr) T(::cuda::std::forward<U>(val));
   new (ptr) T(std::forward<U>(val));
 }
+#endif // USE_ROCM
 #endif
 
 } // namespace detail

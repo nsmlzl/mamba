@@ -36,7 +36,7 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
 #ifndef USE_ROCM
-    static constexpr int kNElts = kNBytes == 4 ? 4 : ::min(8, kNItems);
+    static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
 #else
     static constexpr int kNElts = kNBytes == 4 ? 4 : rocm_utils::min(8, kNItems);
 #endif
@@ -351,7 +351,7 @@ template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
 #ifndef USE_ROCM
     if (params.seqlen <= 128) {
-       selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 256) {
         selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 512) {

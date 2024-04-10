@@ -261,7 +261,7 @@ dependencies = [
 if not _is_hip():
     dependencies += [
         "triton",
-        "causal_conv1d>=1.2.0",
+        # "causal_conv1d>=1.2.0",
     ]
 
 

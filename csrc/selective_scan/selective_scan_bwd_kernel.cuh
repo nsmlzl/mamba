@@ -39,7 +39,7 @@ struct Selective_Scan_bwd_kernel_traits {
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
 #ifndef USE_ROCM
-    static constexpr int kNElts = kNBytes == 4 ? 4 : ::min(8, kNItems);
+    static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
 #else
     static constexpr int kNElts = kNBytes == 4 ? 4 : rocm_utils::min(8, kNItems);
 #endif

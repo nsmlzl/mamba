@@ -95,8 +95,11 @@ struct WarpReverseScan {
     //---------------------------------------------------------------------
 
     /// Whether the logical warp size and the PTX warp size coincide
-    // static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == CUB_WARP_THREADS(0));
+#ifndef USE_ROCM
+    static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == CUB_WARP_THREADS(0));
+#else
     static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == HIPCUB_WARP_THREADS);
+#endif
     /// The number of warp scan steps
     static constexpr int STEPS = cub::Log2<LOGICAL_WARP_THREADS>::VALUE;
     static_assert(LOGICAL_WARP_THREADS == 1 << STEPS);

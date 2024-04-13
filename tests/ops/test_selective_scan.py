@@ -149,9 +149,9 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
 @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 #@pytest.mark.parametrize('itype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('itype', [torch.float32])
-@pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
+@pytest.mark.parametrize('seqlen', [128, 256, 257, 312, 511, 512, 1024, 2048, 2048, 4096, 4096 + 62, 4096 + 511])
 @pytest.mark.parametrize("return_last_state", [True])
-@pytest.mark.parametrize('delta_softplus', [True])
+@pytest.mark.parametrize('delta_softplus', [False, True])
 def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state, delta_softplus):
     device = 'cuda'
     rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
@@ -179,19 +179,22 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
     # tensors for selective scan with hidden state init
     A_hsi_0 = A.detach().clone().requires_grad_()
     A_hsi_1 = A.detach().clone().requires_grad_()
-    B_hsi_0 = B[:,:,: B.size(2)//2].detach().clone().requires_grad_()
-    B_hsi_1 = B[:,:,B.size(2)//2:].detach().clone().requires_grad_()
-    C_hsi_0 = C[:,:,:C.size(2)//2].detach().clone().requires_grad_()
-    C_hsi_1 = C[:,:,C.size(2)//2:].detach().clone().requires_grad_()
+    B_hsi_0 = B[:,:,: (seqlen//2) * (2 if is_complex else 1)].detach().clone().requires_grad_()
+    B_hsi_1 = B[:,:,(seqlen//2) * (2 if is_complex else 1):].detach().clone().requires_grad_()
+    C_hsi_0 = C[:,:,:(seqlen//2) * (2 if is_complex else 1)].detach().clone().requires_grad_()
+    C_hsi_1 = C[:,:,(seqlen//2) * (2 if is_complex else 1):].detach().clone().requires_grad_()
     D_hsi_0 = D.detach().clone().requires_grad_()
     D_hsi_1 = D.detach().clone().requires_grad_()
     z_hsi = z
-    u_hsi_0 = u[:,:,:u.size(2)//2].detach().clone().requires_grad_()
-    u_hsi_1 = u[:,:,u.size(2)//2:].detach().clone().requires_grad_()
-    delta_hsi_0 = delta[:,:,:delta.size(2)//2].detach().clone().requires_grad_()
-    delta_hsi_1 = delta[:,:,delta.size(2)//2:].detach().clone().requires_grad_()
+    u_hsi_0 = u[:,:,:seqlen//2].detach().clone().requires_grad_()
+    u_hsi_1 = u[:,:,seqlen//2:].detach().clone().requires_grad_()
+    delta_hsi_0 = delta[:,:,:seqlen//2].detach().clone().requires_grad_()
+    delta_hsi_1 = delta[:,:,seqlen//2:].detach().clone().requires_grad_()
     delta_bias_hsi_0 = delta_bias.detach().clone().requires_grad_()
     delta_bias_hsi_1 = delta_bias.detach().clone().requires_grad_()
+
+    return_dx0_hsi_1 = torch.empty(batch_size, dim, dstate, device=device, dtype=wtype).requires_grad_()
+    return_dx0_a_hsi_1 = torch.empty(batch_size, dim, dstate, device=device, dtype=wtype).requires_grad_()
 
     # compute output with single recursive computation (reference)
     out, last_state = selective_scan_fn(
@@ -202,24 +205,26 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
 
     # compute output with two recursive computations; second computation is initialized
     # with hidden state of previous computation
-    out_hsi_0, last_state_hsi_0 = selective_scan_fn(
+    out_hsi_0, dummy_dx0_hsi_0, dummy_dx0_a_hsi_0, last_state_hsi_0 = selective_scan_fn(
         u_hsi_0, delta_hsi_0, A_hsi_0, B_hsi_0, C_hsi_0, D_hsi_0, z=z_hsi,
         delta_bias=delta_bias_hsi_0, delta_softplus=delta_softplus,
-        return_last_state=return_last_state
+        return_last_state=return_last_state, expect_dx0=True
     )
+    hsi_0_combined = torch.cat((out_hsi_0.reshape(-1), dummy_dx0_hsi_0.reshape(-1), dummy_dx0_a_hsi_0.reshape(-1)), dim=0)
 
     out_hsi_1, last_state_hsi_1 = selective_scan_fn(
         u_hsi_1, delta_hsi_1, A_hsi_1, B_hsi_1, C_hsi_1, D_hsi_1, z=z_hsi,
         delta_bias=delta_bias_hsi_1, delta_softplus=delta_softplus,
-        x_in=last_state_hsi_0.detach().clone(), return_last_state=return_last_state
+        x_in=last_state_hsi_0.detach().clone(), return_last_state=return_last_state,
+        return_dx0=return_dx0_hsi_1, return_dx0_a=return_dx0_a_hsi_1
     )
     # join output into single tensor
     out_hsi = torch.cat((out_hsi_0, out_hsi_1), dim=2)
 
-    print(out[0,0,1], out_hsi[0,0,1])
-    print(out[0,0,65], out_hsi[0,0,65])
-    print(out[0,0,-1], out_hsi[0,0,-1])
-    print(out[1,1,-1], out_hsi[1,1,-1])
+    #print(out[0,0,1], out_hsi[0,0,1])
+    #print(out[0,0,65], out_hsi[0,0,65])
+    #print(out[0,0,-1], out_hsi[0,0,-1])
+    #print(out[1,1,-1], out_hsi[1,1,-1])
 
     assert out.shape == out_hsi.shape
     assert torch.allclose(out, out_hsi, rtol=rtol, atol=atol)
@@ -233,18 +238,18 @@ def test_set_hidden_state_selective_scan(wtype, itype, seqlen, return_last_state
 
     out.backward(g)
     out_hsi_1.backward(g_hsi_1)
-    out_hsi_0.backward(g_hsi_0)
+    hsi_0_combined.backward(torch.cat((g_hsi_0.reshape(-1), return_dx0_hsi_1.grad.reshape(-1),
+                                       return_dx0_a_hsi_1.grad.reshape(-1)), dim=0))
 
-    assert torch.allclose(u.grad[:,:,u.size(2)//2:], u_hsi_1.grad, rtol=rtol, atol=atol)
-    assert torch.allclose(delta.grad[:,:,delta.size(2)//2:], delta_hsi_1.grad, rtol=rtol, atol=atol)
-    # TODO unable to test A
-    assert torch.allclose(B.grad[:,:,B.size(2)//2:], B_hsi_1.grad, rtol=rtol, atol=atol)
-    assert torch.allclose(C.grad[:,:,C.size(2)//2:], C_hsi_1.grad, rtol=rtol, atol=atol)
-    # TODO unable to test D
-    # TODO unable to test delta_bias
 
-    raise NotImplementedError()
 
+    assert torch.allclose(u.grad, torch.cat((u_hsi_0.grad, u_hsi_1.grad), dim=2), rtol=rtol, atol=atol)
+    assert torch.allclose(delta.grad, torch.cat((delta_hsi_0.grad, delta_hsi_1.grad), dim=2), rtol=rtol, atol=atol)
+    assert torch.allclose(A.grad, A_hsi_0.grad + A_hsi_1.grad, rtol=rtol, atol=atol)
+    assert torch.allclose(B.grad, torch.cat((B_hsi_0.grad, B_hsi_1.grad), dim=2), rtol=rtol, atol=atol)
+    assert torch.allclose(C.grad, torch.cat((C_hsi_0.grad, C_hsi_1.grad), dim=2), rtol=rtol, atol=atol)
+    assert torch.allclose(D.grad, D_hsi_0.grad + D_hsi_1.grad, rtol=rtol, atol=atol)
+    assert torch.allclose(delta_bias.grad, delta_bias_hsi_0.grad + delta_bias_hsi_1.grad, rtol=rtol, atol=atol)
 
 @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 # @pytest.mark.parametrize('wtype', [torch.complex64])

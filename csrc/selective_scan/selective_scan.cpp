@@ -180,10 +180,16 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         const at::Tensor dB,
                         const at::Tensor dC,
                         const at::Tensor dz,
+                        const at::Tensor prev_dx0,
+                        const at::Tensor prev_dx0_a,
+                        const at::Tensor dx0,
+                        const at::Tensor dx0_a,
                         void* dD_ptr,
                         void* ddelta_bias_ptr,
                         bool has_z,
                         bool has_x_in,
+                        bool has_prev_dx0,
+                        bool return_dx0,
                         bool delta_softplus,
                         bool recompute_out_z) {
     // Pass in "dout" instead of "out", we're not gonna use "out" unless we have z
@@ -206,6 +212,10 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
     params.ddelta_ptr = ddelta.data_ptr();
     params.ddelta_bias_ptr = ddelta_bias_ptr;
     params.dz_ptr = has_z ? dz.data_ptr() : nullptr;
+    params.prev_dx0_ptr = has_prev_dx0 ? prev_dx0.data_ptr() : nullptr;
+    params.prev_dx0_a_ptr = has_prev_dx0 ? prev_dx0_a.data_ptr() : nullptr;
+    params.dx0_ptr = return_dx0 ? dx0.data_ptr() : nullptr;
+    params.dx0_a_ptr = return_dx0 ? dx0_a.data_ptr() : nullptr;
     // All stride are in elements, not bytes.
     params.dout_batch_stride = dout.stride(0);
     params.dout_d_stride = dout.stride(1);
@@ -232,6 +242,28 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
     if (has_z) {
         params.dz_batch_stride = dz.stride(0);
         params.dz_d_stride = dz.stride(1);
+    }
+    if (has_prev_dx0) {
+        params.prev_dx0_batch_stride = prev_dx0.stride(0);
+        params.prev_dx0_d_stride = prev_dx0.stride(1);
+        params.prev_dx0_a_batch_stride = prev_dx0_a.stride(0);
+        params.prev_dx0_a_d_stride = prev_dx0_a.stride(1);
+    } else {
+        params.prev_dx0_batch_stride = 0;
+        params.prev_dx0_d_stride = 0;
+        params.prev_dx0_a_batch_stride = 0;
+        params.prev_dx0_a_d_stride = 0;
+    }
+    if (return_dx0) {
+        params.dx0_batch_stride = dx0.stride(0);
+        params.dx0_d_stride = dx0.stride(1);
+        params.dx0_a_batch_stride = dx0_a.stride(0);
+        params.dx0_a_d_stride = dx0_a.stride(1);
+    } else {
+        params.dx0_batch_stride = 0;
+        params.dx0_d_stride = 0;
+        params.dx0_a_batch_stride = 0;
+        params.dx0_a_d_stride = 0;
     }
 }
 
@@ -364,11 +396,14 @@ selective_scan_bwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
                   const at::Tensor &dout,
+                  const c10::optional<at::Tensor> &prev_dx0_,
+                  const c10::optional<at::Tensor> &prev_dx0_a_,
                   const c10::optional<at::Tensor> &x_,
                   const c10::optional<at::Tensor> &out_,
                   c10::optional<at::Tensor> &dz_,
                   bool delta_softplus,
-                  bool recompute_out_z) {
+                  bool recompute_out_z,
+                  bool return_dx0) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -476,6 +511,21 @@ selective_scan_bwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
         }
     }
 
+    at::Tensor prev_dx0;
+    at::Tensor prev_dx0_a;
+    TORCH_CHECK(prev_dx0_.has_value() == prev_dx0_a_.has_value(), "Both prev_dx0_ and prev_dx0_a need to be provided");
+    const bool has_prev_dx0 = prev_dx0_.has_value() && prev_dx0_a_;
+    if (has_prev_dx0) {
+        prev_dx0 = prev_dx0_.value();
+        TORCH_CHECK(prev_dx0.is_cuda());
+        TORCH_CHECK(prev_dx0.scalar_type() == weight_type);
+        CHECK_SHAPE(prev_dx0, batch_size, dim, dstate);
+        prev_dx0_a = prev_dx0_a_.value();
+        TORCH_CHECK(prev_dx0_a.is_cuda());
+        TORCH_CHECK(prev_dx0_a.scalar_type() == weight_type);
+        CHECK_SHAPE(prev_dx0_a, batch_size, dim, dstate);
+    }
+
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
     // const int n_chunks = (seqlen + 1024 - 1) / 1024;
     if (n_chunks > 1) { TORCH_CHECK(x_.has_value()); }
@@ -493,6 +543,11 @@ selective_scan_bwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
     at::Tensor dB = !is_variable_B ? torch::zeros_like(B) : torch::zeros_like(B, B.options().dtype(torch::kFloat32));
     at::Tensor dC = !is_variable_C ? torch::zeros_like(C) : torch::zeros_like(C, C.options().dtype(torch::kFloat32));
     at::Tensor dD;
+    at::Tensor dx0, dx0_a;
+    if (return_dx0 == true) {
+        dx0 = torch::zeros({batch_size, dim, dstate}, u.options().dtype(weight_type));
+        dx0_a = torch::zeros({batch_size, dim, dstate}, u.options().dtype(weight_type));
+    }
     if (D_.has_value()) { dD = torch::zeros_like(D_.value()); }
     at::Tensor ddelta_bias;
     if (delta_bias_.has_value()) { ddelta_bias = torch::zeros_like(delta_bias_.value()); }
@@ -503,10 +558,10 @@ selective_scan_bwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
                        D_.has_value() ? D_.value().data_ptr() : nullptr,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
                        x_.has_value() ? x_.value().data_ptr() : nullptr,
-                       dout, du, ddelta, dA, dB, dC, dz,
+                       dout, du, ddelta, dA, dB, dC, dz, prev_dx0, prev_dx0_a, dx0, dx0_a,
                        D_.has_value() ? dD.data_ptr() : nullptr,
                        delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
-                       has_z, has_x_in, delta_softplus, recompute_out_z);
+                       has_z, has_x_in, has_prev_dx0, return_dx0, delta_softplus, recompute_out_z);
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -517,7 +572,7 @@ selective_scan_bwd(const at::Tensor &u, const c10::optional<at::Tensor> &x_in_, 
             selective_scan_bwd_cuda<input_t, weight_t>(params, stream);
         });
     });
-    std::vector<at::Tensor> result = {du, ddelta, dA, dB.to(B.dtype()), dC.to(C.dtype()), dD, ddelta_bias};
+    std::vector<at::Tensor> result = {du, ddelta, dA, dB.to(B.dtype()), dC.to(C.dtype()), dD, ddelta_bias, dx0, dx0_a};
     if (has_z) { result.push_back(dz); }
     if (recompute_out_z) { result.push_back(out_z); }
     return result;

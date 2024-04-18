@@ -41,6 +41,7 @@ class Mamba(nn.Module):
         dt_init="random",
         dt_scale=1.0,
         dt_init_floor=1e-4,
+        max_hstate_trnsf_cnt=0,
         conv_bias=True,
         bias=False,
         use_fast_path=True,  # Fused kernel options
@@ -116,6 +117,11 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
+        self.max_hstate_trnsf_cnt = max_hstate_trnsf_cnt
+        self.hstate_trnsf_cnt = 0
+        self.hstate_trnsf_ssm = None
+        self.hstate_trnsf_conv = None
+
     def forward(self, hidden_states, inference_params=None):
         """
         hidden_states: (B, L, D)
@@ -123,7 +129,24 @@ class Mamba(nn.Module):
         """
         batch, seqlen, dim = hidden_states.shape
 
-        conv_state, ssm_state = None, None
+        if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt:
+            # TODO check dimensions of hstates
+            if self.hstate_trnsf_conv is not None:
+                conv_state.copy_(hstate_trnsf_conv)
+            else:
+                conv_state = None
+
+            if self.hstate_trnsf_ssm is not None:
+                ssm_state.copy_(hstate_trnsf_ssm)
+            else:
+                ssm_state = None
+
+            self.hstate_trnsf_cnt = self.hstate_trnsf_cnt + 1
+        else:
+            conv_state, ssm_state = None, None
+            self.hstate_trnsf_cnt = 0
+
+        # TODO: this needs to be considered; we are currently not using it
         if inference_params is not None:
             conv_state, ssm_state = self._get_states_from_cache(inference_params, batch)
             if inference_params.seqlen_offset > 0:
@@ -173,8 +196,13 @@ class Mamba(nn.Module):
                     x=x,
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
+                    initial_states=conv_state,
+                    return_final_states=self.max_hstate_trnsf_cnt is not 0,
                     activation=self.activation,
                 )
+                if self.max_hstate_trnsf_cnt is not 0:
+                    x, last_state = x
+                    self.hstate_trnsf_conv.copy_(last_state)
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
@@ -196,11 +224,13 @@ class Mamba(nn.Module):
                 z=z,
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
-                return_last_state=ssm_state is not None,
+                x_in=ssm_state,
+                return_last_state=self.max_hstate_trnsf_cnt is not 0,
             )
-            if ssm_state is not None:
+            if self.max_hstate_trnsf_cnt is not 0:
                 y, last_state = y
-                ssm_state.copy_(last_state)
+                #ssm_state.copy_(last_state)
+                self.hstate_trnsf_ssm.copy_(last_state)
             y = rearrange(y, "b d l -> b l d")
             out = self.out_proj(y)
         return out

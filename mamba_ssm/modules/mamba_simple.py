@@ -118,7 +118,8 @@ class Mamba(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
         self.max_hstate_trnsf_cnt = max_hstate_trnsf_cnt
-        self.hstate_trnsf_cnt = 0
+        self.trnsf_states = max_hstate_trnsf_cnt is not 0
+        self.hstate_trnsf_cnt = max_hstate_trnsf_cnt
         self.hstate_trnsf_ssm = None
         self.hstate_trnsf_conv = None
 
@@ -130,29 +131,21 @@ class Mamba(nn.Module):
         batch, seqlen, dim = hidden_states.shape
 
         if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt:
-            # TODO check dimensions of hstates
-            if self.hstate_trnsf_conv is not None:
-                conv_state.copy_(hstate_trnsf_conv)
-            else:
-                conv_state = None
-
-            if self.hstate_trnsf_ssm is not None:
-                ssm_state.copy_(hstate_trnsf_ssm)
-            else:
-                ssm_state = None
-
             self.hstate_trnsf_cnt = self.hstate_trnsf_cnt + 1
+            # TODO check shape of hstates; though if it does not fit will just fail in cuda kernels
         else:
-            conv_state, ssm_state = None, None
             self.hstate_trnsf_cnt = 0
 
-        # TODO: this needs to be considered; we are currently not using it
+        conv_state, ssm_state = None, None
         if inference_params is not None:
             conv_state, ssm_state = self._get_states_from_cache(inference_params, batch)
             if inference_params.seqlen_offset > 0:
                 # The states are updated inplace
                 out, _, _ = self.step(hidden_states, conv_state, ssm_state)
                 return out
+            else:
+                # TODO: this needs to be considered; we are currently not using it
+                raise NotImplementedError("conv_state, ssm_state not supported")
 
         # We do matmul and transpose BLH -> HBL at the same time
         xz = rearrange(
@@ -165,7 +158,7 @@ class Mamba(nn.Module):
 
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
-        if self.use_fast_path and causal_conv1d_fn is not None and inference_params is None:  # Doesn't support outputting the states
+        if self.use_fast_path and causal_conv1d_fn is not None and not self.trnsf_states and inference_params is None:  # Doesn't support outputting the states
             out = mamba_inner_fn(
                 xz,
                 self.conv1d.weight,
@@ -193,16 +186,17 @@ class Mamba(nn.Module):
             else:
                 assert self.activation in ["silu", "swish"]
                 x = causal_conv1d_fn(
-                    x=x,
+                    x=x if not self.trnsf_states else rearrange(rearrange(x, "b d s -> b s d").contiguous(), "b s d -> b d s"),  # conversion to channel-last memory format
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
-                    initial_states=conv_state,
-                    return_final_states=self.max_hstate_trnsf_cnt is not 0,
+                    initial_states=self.hstate_trnsf_conv,
+                    return_final_states=self.trnsf_states,
                     activation=self.activation,
                 )
-                if self.max_hstate_trnsf_cnt is not 0:
-                    x, last_state = x
-                    self.hstate_trnsf_conv.copy_(last_state)
+                if self.trnsf_states:
+                    x, final_states = x
+                    x = rearrange(rearrange(x, "b d s -> d b s").contiguous(), "d b s -> b d s")  # convert back
+                    self.hstate_trnsf_conv = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
@@ -224,13 +218,13 @@ class Mamba(nn.Module):
                 z=z,
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
-                x_in=ssm_state,
-                return_last_state=self.max_hstate_trnsf_cnt is not 0,
+                x_in=self.hstate_trnsf_ssm,
+                return_last_state=self.trnsf_states,
             )
-            if self.max_hstate_trnsf_cnt is not 0:
-                y, last_state = y
-                #ssm_state.copy_(last_state)
-                self.hstate_trnsf_ssm.copy_(last_state)
+            if self.trnsf_states:
+                y, final_states = y
+                self.hstate_trnsf_ssm = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
+
             y = rearrange(y, "b d l -> b l d")
             out = self.out_proj(y)
         return out

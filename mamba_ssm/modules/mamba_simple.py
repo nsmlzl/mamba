@@ -143,9 +143,6 @@ class Mamba(nn.Module):
                 # The states are updated inplace
                 out, _, _ = self.step(hidden_states, conv_state, ssm_state)
                 return out
-            else:
-                # TODO: this needs to be considered; we are currently not using it
-                raise NotImplementedError("conv_state, ssm_state not supported")
 
         # We do matmul and transpose BLH -> HBL at the same time
         xz = rearrange(
@@ -219,11 +216,14 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 x_in=self.hstate_trnsf_ssm,
-                return_last_state=self.trnsf_states,
+                return_last_state=self.trnsf_states or ssm_state is not None,
             )
-            if self.trnsf_states:
+            if self.trnsf_states or ssm_state is not None:
                 y, final_states = y
-                self.hstate_trnsf_ssm = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
+                if self.trnsf_states:
+                    self.hstate_trnsf_ssm = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
+                if ssm_state is not None:
+                    ssm_state.copy_(final_states)
 
             y = rearrange(y, "b d l -> b l d")
             out = self.out_proj(y)

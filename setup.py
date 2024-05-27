@@ -57,6 +57,10 @@ def get_platform():
         return "win_amd64"
     else:
         raise ValueError("Unsupported platform: {}".format(sys.platform))
+    
+
+def _is_hip():
+    return torch.version.hip is not None
 
 
 def get_cuda_bare_metal_version(cuda_dir):
@@ -83,7 +87,9 @@ def check_if_cuda_home_none(global_option: str) -> None:
 
 
 def append_nvcc_threads(nvcc_extra_args):
-    return nvcc_extra_args + ["--threads", "4"]
+    if not _is_hip():
+        return nvcc_extra_args + ["--threads", "4"]
+    return nvcc_extra_args
 
 
 cmdclass = {}
@@ -97,21 +103,39 @@ if not SKIP_CUDA_BUILD:
     check_if_cuda_home_none(PACKAGE_NAME)
     # Check, if CUDA11 is installed for compute capability 8.0
     cc_flag = []
-    if CUDA_HOME is not None:
-        _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-        if bare_metal_version < Version("11.6"):
-            raise RuntimeError(
-                f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
-                "Note: make sure nvcc has a supported version by running nvcc -V."
-            )
-
-    cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_70,code=sm_70")
-    cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_80,code=sm_80")
-    if bare_metal_version >= Version("11.8"):
+    
+    if not _is_hip():
+        if CUDA_HOME is not None:
+            _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
+            if bare_metal_version < Version("11.6"):
+                raise RuntimeError(
+                    f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
+                    "Note: make sure nvcc has a supported version by running nvcc -V."
+                )
+                
         cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_90,code=sm_90")
+        cc_flag.append("arch=compute_53,code=sm_53")
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_62,code=sm_62")
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_70,code=sm_70")
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_72,code=sm_72")
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_80,code=sm_80")
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_87,code=sm_87")
+        if bare_metal_version >= Version("11.8"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_90,code=sm_90")
+            
+        cc_flag += [
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--use_fast_math",
+            "--ptxas-options=-v",
+            "-lineinfo",
+        ]
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
@@ -146,11 +170,6 @@ if not SKIP_CUDA_BUILD:
                         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                         "-U__CUDA_NO_BFLOAT162_OPERATORS__",
                         "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-                        "--expt-relaxed-constexpr",
-                        "--expt-extended-lambda",
-                        "--use_fast_math",
-                        "--ptxas-options=-v",
-                        "-lineinfo",
                     ]
                     + cc_flag
                 ),
@@ -231,6 +250,21 @@ class CachedWheelsCommand(_bdist_wheel):
             super().run()
 
 
+dependencies = [
+    "torch",
+    "packaging",
+    "ninja",
+    "einops",
+    "transformers",
+]
+
+if not _is_hip():
+    dependencies += [
+        "triton",
+        # "causal_conv1d>=1.2.0",
+    ]
+
+
 setup(
     name=PACKAGE_NAME,
     version=get_package_version(),
@@ -264,13 +298,5 @@ setup(
         "bdist_wheel": CachedWheelsCommand,
     },
     python_requires=">=3.7",
-    install_requires=[
-        "torch",
-        "packaging",
-        "ninja",
-        "einops",
-        "triton",
-        "transformers",
-        # "causal_conv1d>=1.2.0",
-    ],
+    install_requires=dependencies,
 )

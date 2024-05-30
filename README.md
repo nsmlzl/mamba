@@ -28,11 +28,13 @@ Other requirements:
 
 ## ROCm
 
+I did not create this ROCm port; it is from [here](https://github.com/EmbeddedLLM/mamba-rocm).
+
 This port supports building with ROCm from source. In a ROCm system, run `pip install .` to build the project.
 
 Notes:
 - For older ROCm versions (prior to ROCm 6.1), errors of ODR violations in some of HIP's BF16 type conversion functions may be encountered when building the kernels. It can be fixed following the method of [patching ROCm's bf16 header](https://github.com/vllm-project/vllm/blob/main/rocm_patch/rocm_bf16.patch). located at `/opt/rocm/include/hip/amd_detail/amd_hip_bf16.h` ([source](https://github.com/ROCm/clr/commit/77c581a3ebd47b5e2908973b70adea66891159ee)).
-- Building from source the latest [triton for ROCm](https://github.com/ROCm/triton/tree/triton-mlir) is required to use the autotuning configs
+- Building from source the latest [official triton](https://github.com/triton-lang/triton) is required to use the autotuning configs
 
 ## Usage
 

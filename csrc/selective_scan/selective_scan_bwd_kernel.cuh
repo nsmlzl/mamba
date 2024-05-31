@@ -131,6 +131,31 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     const int group_id = dim_id / (params.dim_ngroups_ratio);
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
         + dim_id * params.u_d_stride;
+    weight_t *x_in = nullptr;
+    if (params.x_in_ptr != nullptr) {
+        x_in = reinterpret_cast<weight_t *>(params.x_in_ptr) + batch_id * params.x_in_batch_stride
+            + dim_id * params.x_in_d_stride;
+    }
+    weight_t *prev_dx0 = nullptr;
+    if (params.prev_dx0_ptr != nullptr) {
+        prev_dx0 = reinterpret_cast<weight_t *>(params.prev_dx0_ptr) + batch_id * params.prev_dx0_batch_stride
+            + dim_id * params.prev_dx0_d_stride;
+    }
+    weight_t *prev_dx0_a = nullptr;
+    if (params.prev_dx0_a_ptr != nullptr) {
+        prev_dx0_a = reinterpret_cast<weight_t *>(params.prev_dx0_a_ptr) + batch_id * params.prev_dx0_a_batch_stride
+            + dim_id * params.prev_dx0_a_d_stride;
+    }
+    weight_t *dx0 = nullptr;
+    if (params.dx0_ptr != nullptr) {
+        dx0 = reinterpret_cast<weight_t *>(params.dx0_ptr) + batch_id * params.dx0_batch_stride
+            + dim_id * params.dx0_d_stride;
+    }
+    weight_t *dx0_a = nullptr;
+    if (params.dx0_a_ptr != nullptr) {
+        dx0_a = reinterpret_cast<weight_t *>(params.dx0_a_ptr) + batch_id * params.dx0_a_batch_stride
+            + dim_id * params.dx0_a_d_stride;
+    }
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
         + dim_id * params.delta_d_stride;
     input_t *dout = reinterpret_cast<input_t *>(params.dout_ptr) + batch_id * params.dout_batch_stride
@@ -175,6 +200,9 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         __syncthreads();
         load_input<Ktraits>(dout, dout_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
         dout -= kChunkSize;
+
+        const int ChunkSeqlen = (chunk == params.n_chunks - 1 && params.seqlen % kChunkSize != 0) ?
+            params.seqlen % kChunkSize : kChunkSize;
 
         float dout_vals[kNItems], delta_vals[kNItems];
         #pragma unroll
@@ -278,13 +306,27 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 thread_reverse_data[kNItems - 1].x = threadIdx.x == kNThreads - 1
                     ? (chunk == params.n_chunks - 1 ? 1.f : smem_delta_a[state_idx + ((chunk + 1) % 2) * MAX_DSTATE])
                     : smem_delta_a[threadIdx.x + 1 + 2 * MAX_DSTATE];
+                if (threadIdx.x == (ChunkSeqlen - 1) / kNItems && chunk == params.n_chunks-1 && prev_dx0_a != nullptr ) {
+                    thread_reverse_data[(ChunkSeqlen-1)%kNItems].x = prev_dx0_a[state_idx];
+                }
                 // Initialize running total
                 scan_t running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? x[(chunk - 1) * params.dstate + state_idx] : make_float2(1.f, 0.f);
+                if (chunk == 0 && threadIdx.x == 0 && x_in != nullptr) running_prefix.y = x_in[state_idx];
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
                 scan_t running_postfix = chunk < params.n_chunks - 1 && threadIdx.x % 32 == 0 ? smem_running_postfix[state_idx] : make_float2(1.f, 0.f);
+                if (chunk == params.n_chunks - 1 && prev_dx0 != nullptr) {
+                    // when all slots used, store to running_postfix.y
+                    if (threadIdx.x == 0 && ChunkSeqlen == kChunkSize) {
+                        running_postfix.y = prev_dx0[state_idx];
+                    }
+                    // else in next greater y
+                    else if (ChunkSeqlen / kNItems == threadIdx.x) {
+                        thread_reverse_data[ChunkSeqlen % kNItems].y = prev_dx0[state_idx];
+                    }
+                }
                 SSMScanPrefixCallbackOp<weight_t> postfix_op(running_postfix);
                 typename Ktraits::BlockReverseScanT(smem_reverse_scan).InclusiveReverseScan(
                     thread_reverse_data, thread_reverse_data, SSMScanOp<weight_t>(), postfix_op
@@ -298,8 +340,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     const float ddelta_u = !kIsVariableB ? dx : dx * B_vals[i];
                     du_vals[i] += ddelta_u * delta_vals[i];
                     const float a = thread_data[i].y - (!kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
-                    ddelta_vals[i] += ddelta_u * float(u_vals[i]) + dx * A_val * a;
-                    dA_val += dx * delta_vals[i] * a;
+                    ddelta_vals[i] += (threadIdx.x * kNItems + i) < ChunkSeqlen ? ddelta_u * float(u_vals[i]) + dx * A_val * a : 0.0;
+                    dA_val += (threadIdx.x * kNItems + i) < ChunkSeqlen ? dx * delta_vals[i] * a : 0.0;
                     if constexpr (!kIsVariableB || !kIsVariableC) {
                         if constexpr (!kIsVariableB) {  // dBC_val is dB_val
                             dBC_val += dout_vals[i] * (!kIsVariableC ? thread_data[i].y : thread_data[i].y * C_vals[i]);
@@ -344,6 +386,10 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 }
                 if (threadIdx.x == 0) {
                     smem_da[state_idx] = chunk == params.n_chunks - 1 ? dA_val : dA_val + smem_da[state_idx];
+                    if (chunk == 0 && dx0 != nullptr && dx0_a != nullptr) {
+                        dx0[state_idx] = thread_reverse_data[0].y;
+                        dx0_a[state_idx] = exp2f(delta_vals[0] * A_scaled);
+                    }
                 }
             } else {
                 #pragma unroll
@@ -371,13 +417,33 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     : smem_delta_a[threadIdx.x + 1 + 2 * MAX_DSTATE];
                 thread_reverse_data[kNItems - 1].x = delta_a_exp.real_;
                 thread_reverse_data[kNItems - 1].y = -delta_a_exp.imag_;
+                if (threadIdx.x == (ChunkSeqlen - 1) / kNItems && chunk == params.n_chunks-1 && prev_dx0_a != nullptr ) {
+                    thread_reverse_data[(ChunkSeqlen-1)%kNItems].x = prev_dx0_a[state_idx].real_;
+                    thread_reverse_data[(ChunkSeqlen-1)%kNItems].y = -prev_dx0_a[state_idx].imag_;
+                }
                 // Initialize running total
                 scan_t running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? x[(chunk - 1) * params.dstate + state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
+                if (chunk == 0 && threadIdx.x == 0 && x_in != nullptr) {
+                    running_prefix.z = x_in[state_idx].real_;
+                    running_prefix.w = x_in[state_idx].imag_;
+                }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
                 scan_t running_postfix = chunk < params.n_chunks - 1 && threadIdx.x % 32 == 0 ? smem_running_postfix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
+                if (chunk == params.n_chunks - 1 && prev_dx0 != nullptr) {
+                    // when all slots used, store to running_postfix
+                    if (threadIdx.x == 0 && ChunkSeqlen == kChunkSize) {
+                        running_postfix.z = prev_dx0[state_idx].real_;
+                        running_postfix.w = prev_dx0[state_idx].imag_;
+                    }
+                    // else in next greater thread_reverse_data element
+                    else if (ChunkSeqlen / kNItems == threadIdx.x) {
+                        thread_reverse_data[ChunkSeqlen % kNItems].z = prev_dx0[state_idx].real_;
+                        thread_reverse_data[ChunkSeqlen % kNItems].w = prev_dx0[state_idx].imag_;
+                    }
+                }
                 SSMScanPrefixCallbackOp<weight_t> postfix_op(running_postfix);
                 typename Ktraits::BlockReverseScanT(smem_reverse_scan).InclusiveReverseScan(
                     thread_reverse_data, thread_reverse_data, SSMScanOp<weight_t>(), postfix_op
@@ -399,8 +465,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     }
                     const complex_t a_conj = conj(x - (!kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]));
                     du_vals[i] += ddelta_u * delta_vals[i];
-                    ddelta_vals[i] += ddelta_u * float(u_vals[i]) + (dx * conj(A_val) * a_conj).real_;
-                    dA_val += delta_vals[i] * dx * a_conj;
+                    ddelta_vals[i] += (threadIdx.x * kNItems + i) < ChunkSeqlen ? ddelta_u * float(u_vals[i]) + (dx * conj(A_val) * a_conj).real_ : 0.0;
+                    dA_val += (threadIdx.x * kNItems + i) < ChunkSeqlen ? delta_vals[i] * dx * a_conj : 0.0;
                     if constexpr (kIsVariableB) { dB_vals[i] = dx * delta_vals[i] * float(u_vals[i]); }
                     if constexpr (kIsVariableC) {
                         dC_vals[i] = (2 * dout_vals[i]) * conj(!kIsVariableB ? x * B_val : x);
@@ -450,6 +516,11 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 }
                 if (threadIdx.x == 0) {
                     smem_da[state_idx] = chunk == params.n_chunks - 1 ? dA_val : dA_val + smem_da[state_idx];
+                    if (chunk == 0 && dx0 != nullptr && dx0_a != nullptr) {
+                        dx0[state_idx].real_ = thread_reverse_data[0].z;
+                        dx0[state_idx].imag_ = thread_reverse_data[0].w;
+                        dx0_a[state_idx] = cexp2f(delta_vals[0] * A_scaled);
+                    }
                 }
             }
         }

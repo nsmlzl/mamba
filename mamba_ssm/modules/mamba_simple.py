@@ -41,6 +41,7 @@ class Mamba(nn.Module):
         dt_init="random",
         dt_scale=1.0,
         dt_init_floor=1e-4,
+        max_hstate_trnsf_cnt=0,
         conv_bias=True,
         bias=False,
         use_fast_path=True,  # Fused kernel options
@@ -116,12 +117,24 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
+        self.max_hstate_trnsf_cnt = max_hstate_trnsf_cnt
+        self.trnsf_states = max_hstate_trnsf_cnt is not 0
+        self.hstate_trnsf_cnt = max_hstate_trnsf_cnt
+        self.hstate_trnsf_ssm = None
+        self.hstate_trnsf_conv = None
+
     def forward(self, hidden_states, inference_params=None):
         """
         hidden_states: (B, L, D)
         Returns: same shape as hidden_states
         """
         batch, seqlen, dim = hidden_states.shape
+
+        if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt:
+            self.hstate_trnsf_cnt = self.hstate_trnsf_cnt + 1
+            # TODO check shape of hstates; though if it does not fit will just fail in cuda kernels
+        else:
+            self.hstate_trnsf_cnt = 0
 
         conv_state, ssm_state = None, None
         if inference_params is not None:
@@ -142,7 +155,7 @@ class Mamba(nn.Module):
 
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
-        if self.use_fast_path and causal_conv1d_fn is not None and inference_params is None:  # Doesn't support outputting the states
+        if self.use_fast_path and causal_conv1d_fn is not None and not self.trnsf_states and inference_params is None:  # Doesn't support outputting the states
             out = mamba_inner_fn(
                 xz,
                 self.conv1d.weight,
@@ -170,11 +183,17 @@ class Mamba(nn.Module):
             else:
                 assert self.activation in ["silu", "swish"]
                 x = causal_conv1d_fn(
-                    x=x,
+                    x=x if not self.trnsf_states else rearrange(rearrange(x, "b d s -> b s d").contiguous(), "b s d -> b d s"),  # conversion to channel-last memory format
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
+                    initial_states=self.hstate_trnsf_conv,
+                    return_final_states=self.trnsf_states,
                     activation=self.activation,
                 )
+                if self.trnsf_states:
+                    x, final_states = x
+                    x = rearrange(rearrange(x, "b d s -> d b s").contiguous(), "d b s -> b d s")  # convert back
+                    self.hstate_trnsf_conv = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
@@ -196,11 +215,16 @@ class Mamba(nn.Module):
                 z=z,
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
-                return_last_state=ssm_state is not None,
+                x_in=self.hstate_trnsf_ssm,
+                return_last_state=self.trnsf_states or ssm_state is not None,
             )
-            if ssm_state is not None:
-                y, last_state = y
-                ssm_state.copy_(last_state)
+            if self.trnsf_states or ssm_state is not None:
+                y, final_states = y
+                if self.trnsf_states:
+                    self.hstate_trnsf_ssm = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
+                if ssm_state is not None:
+                    ssm_state.copy_(final_states)
+
             y = rearrange(y, "b d l -> b l d")
             out = self.out_proj(y)
         return out

@@ -45,6 +45,8 @@ struct SSMParamsBase {
     index_t C_group_stride;
     index_t u_batch_stride;
     index_t u_d_stride;
+    index_t x_in_batch_stride;
+    index_t x_in_d_stride;
     index_t delta_batch_stride;
     index_t delta_d_stride;
     index_t z_batch_stride;
@@ -64,6 +66,7 @@ struct SSMParamsBase {
     void *__restrict__ delta_bias_ptr;
     void *__restrict__ out_ptr;
     void *__restrict__ x_ptr;
+    void *__restrict__ x_in_ptr;
     void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
 };
@@ -85,6 +88,14 @@ struct SSMParamsBwd: public SSMParamsBase {
     index_t du_d_stride;
     index_t dz_batch_stride;
     index_t dz_d_stride;
+    index_t prev_dx0_batch_stride;
+    index_t prev_dx0_d_stride;
+    index_t prev_dx0_a_batch_stride;
+    index_t prev_dx0_a_d_stride;
+    index_t dx0_batch_stride;
+    index_t dx0_d_stride;
+    index_t dx0_a_batch_stride;
+    index_t dx0_a_d_stride;
     index_t ddelta_batch_stride;
     index_t ddelta_d_stride;
 
@@ -96,6 +107,10 @@ struct SSMParamsBwd: public SSMParamsBase {
     void *__restrict__ dD_ptr;
     void *__restrict__ du_ptr;
     void *__restrict__ dz_ptr;
+    void *__restrict__ prev_dx0_ptr;
+    void *__restrict__ prev_dx0_a_ptr;
+    void *__restrict__ dx0_ptr;
+    void *__restrict__ dx0_a_ptr;
     void *__restrict__ ddelta_ptr;
     void *__restrict__ ddelta_bias_ptr;
 };

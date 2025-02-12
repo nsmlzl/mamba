@@ -63,6 +63,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         sequence_parallel=True,
         device=None,
         dtype=None,
+        max_hstate_trnsf_cnt=0,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -91,6 +92,13 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
         self.layer_idx = layer_idx
+
+        # Mamboros
+        self.max_hstate_trnsf_cnt = max_hstate_trnsf_cnt
+        self.trnsf_states = max_hstate_trnsf_cnt != 0
+        self.hstate_trnsf_cnt = max_hstate_trnsf_cnt
+        self.hstate_trnsf_ssm = None
+        self.hstate_trnsf_conv = None
 
         # Order: [z, x, B, C, dt]
         d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
@@ -159,6 +167,12 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
+        if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt:
+            self.hstate_trnsf_cnt = self.hstate_trnsf_cnt + 1
+            # TODO check shape of hstates; though if it does not fit will just fail in cuda kernels
+        else:
+            self.hstate_trnsf_cnt = 0
+
         seqlen_og = seqlen
         if seqlen is None:
             batch, seqlen, dim = u.shape
@@ -181,7 +195,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
-        if self.use_mem_eff_path and inference_params is None:
+        if self.use_mem_eff_path and inference_params is None and not self.trnsf_states:
             out = mamba_split_conv1d_scan_combined(
                 zxbcdt,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
@@ -233,13 +247,21 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                     self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)[:, :-(self.d_conv - 1)]
                 )  # (B, L, self.d_ssm + 2 * ngroups * d_state)
             else:
-                xBC = causal_conv1d_fn(
+                y = causal_conv1d_fn(
                     xBC.transpose(1, 2),
                     rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
                     activation=self.activation,
                     seq_idx=seq_idx,
-                ).transpose(1, 2)
+                    initial_states=self.hstate_trnsf_conv,
+                    return_final_states=self.trnsf_states,
+                )
+                if self.trnsf_states is None:
+                    xBC = y.transpose(1, 2)
+                else:
+                    y, final_states = y
+                    self.hstate_trnsf_conv = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
+                    xBC = y.transpose(1, 2)
             x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
             y = mamba_chunk_scan_combined(
                 rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
@@ -251,13 +273,19 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
                 z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
                 dt_bias=self.dt_bias,
+                initial_states=self.hstate_trnsf_ssm,
                 dt_softplus=True,
                 seq_idx=seq_idx,
                 cu_seqlens=cu_seqlens,
                 **dt_limit_kwargs,
-                return_final_states=ssm_state is not None,
+                return_final_states=self.trnsf_states or ssm_state is not None,
                 return_varlen_states=cu_seqlens is not None and inference_params is not None,
             )
+            if self.trnsf_states is not None:
+                y, final_states, *rest = y
+                self.hstate_trnsf_ssm = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
+                # TODO: check if works when ssm_state set?
+
             if ssm_state is not None:
                 y, last_state, *rest = y
                 if cu_seqlens is None:

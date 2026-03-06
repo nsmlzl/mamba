@@ -172,22 +172,36 @@ if not SKIP_CUDA_BUILD:
                     "Note: make sure nvcc has a supported version by running nvcc -V."
                 )
 
+        if bare_metal_version <= Version("12.9"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_53,code=sm_53")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_62,code=sm_62")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_70,code=sm_70")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_72,code=sm_72")
         cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_53,code=sm_53")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_62,code=sm_62")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_70,code=sm_70")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_72,code=sm_72")
+        cc_flag.append("arch=compute_75,code=sm_75")
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_80,code=sm_80")
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_87,code=sm_87")
-
         if bare_metal_version >= Version("11.8"):
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
+        if bare_metal_version >= Version("12.8"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_100,code=sm_100")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_120,code=sm_120")
+        if bare_metal_version >= Version("13.0"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_103,code=sm_103")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_110,code=sm_110")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_121,code=sm_121")
 
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
@@ -279,7 +293,15 @@ def get_wheel_url():
         torch_cuda_version = parse(torch.version.cuda)
         # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.3
         # to save CI time. Minor versions should be compatible.
-        torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.3")
+        if torch_cuda_version.major == 11:
+            torch_cuda_version = parse("11.8")
+        elif torch_cuda_version.major == 12:
+            torch_cuda_version = parse("12.3")
+        elif torch_cuda_version.major == 13:
+            torch_cuda_version = parse("13.0")
+        else:
+            raise ValueError(f"CUDA version {torch_cuda_version} not supported")
+        
         cuda_version = f"{torch_cuda_version.major}"
 
     gpu_compute_version = hip_ver if HIP_BUILD else cuda_version
@@ -288,7 +310,10 @@ def get_wheel_url():
     python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
     platform_name = get_platform()
     mamba_ssm_version = get_package_version()
-    torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
+    if os.environ.get("NVIDIA_PRODUCT_NAME", "") == "PyTorch":
+        torch_version = str(os.environ.get("NVIDIA_PYTORCH_VERSION"))
+    else:
+        torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
 
     # Determine wheel URL based on CUDA version, torch version, python version and OS
@@ -371,7 +396,7 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        # "triton",
+        "triton",
         "transformers",
         # "causal_conv1d>=1.4.0",
     ],

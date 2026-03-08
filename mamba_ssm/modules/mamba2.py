@@ -281,7 +281,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 return_final_states=self.trnsf_states or ssm_state is not None,
                 return_varlen_states=cu_seqlens is not None and inference_params is not None,
             )
-            if self.trnsf_states is not None:
+            if self.trnsf_states is True:
                 y, final_states, *rest = y
                 self.hstate_trnsf_ssm = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
                 # TODO: check if works when ssm_state set?

@@ -63,7 +63,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         sequence_parallel=True,
         device=None,
         dtype=None,
-        max_hstate_trnsf_cnt=0,
+        max_hstate_trnsf_cnt=None,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -95,8 +95,8 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
 
         # Mamboros
         self.max_hstate_trnsf_cnt = max_hstate_trnsf_cnt
-        self.trnsf_states = max_hstate_trnsf_cnt != 0
-        self.hstate_trnsf_cnt = max_hstate_trnsf_cnt
+        self.trnsf_states = bool(self.max_hstate_trnsf_cnt)
+        self.hstate_trnsf_cnt = self.max_hstate_trnsf_cnt if self.trnsf_states else 0
         self.hstate_trnsf_ssm = None
         self.hstate_trnsf_conv = None
 
@@ -167,11 +167,11 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
-        if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt:
-            self.hstate_trnsf_cnt = self.hstate_trnsf_cnt + 1
-            # TODO check shape of hstates; though if it does not fit will just fail in cuda kernels
-        else:
-            self.hstate_trnsf_cnt = 0
+        if self.trnsf_states:
+            if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt:
+                self.hstate_trnsf_cnt = self.hstate_trnsf_cnt + 1
+            else:
+                self.hstate_trnsf_cnt = 0
 
         seqlen_og = seqlen
         if seqlen is None:
@@ -256,12 +256,10 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                     initial_states=self.hstate_trnsf_conv,
                     return_final_states=self.trnsf_states,
                 )
-                if self.trnsf_states is None:
-                    xBC = y.transpose(1, 2)
-                else:
+                if self.trnsf_states:
                     y, final_states = y
                     self.hstate_trnsf_conv = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
-                    xBC = y.transpose(1, 2)
+                xBC = y.transpose(1, 2)
             x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
             y = mamba_chunk_scan_combined(
                 rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
@@ -281,18 +279,18 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 return_final_states=self.trnsf_states or ssm_state is not None,
                 return_varlen_states=cu_seqlens is not None and inference_params is not None,
             )
-            if self.trnsf_states is True:
-                y, final_states, *rest = y
-                self.hstate_trnsf_ssm = final_states.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
-                # TODO: check if works when ssm_state set?
-
-            if ssm_state is not None:
+            if self.trnsf_states or ssm_state is not None:
                 y, last_state, *rest = y
-                if cu_seqlens is None:
-                    ssm_state.copy_(last_state)
-                else:
-                    varlen_states = rest[0]
-                    ssm_state.copy_(varlen_states)
+                if self.trnsf_states:
+                    self.hstate_trnsf_ssm = last_state.detach() if self.hstate_trnsf_cnt < self.max_hstate_trnsf_cnt else None
+
+                if ssm_state is not None:
+                    if cu_seqlens is None:
+                        ssm_state.copy_(last_state)
+                    else:
+                        varlen_states = rest[0]
+                        ssm_state.copy_(varlen_states)
+
             y = rearrange(y, "b l h p -> b l (h p)")
             if self.rmsnorm:
                 y = self.norm(y, z)

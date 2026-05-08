@@ -34,6 +34,8 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 from huggingface_hub import PyTorchModelHubMixin
 
 
+TBPTT_SUPPORTED = True
+
 class Mamba2(nn.Module, PyTorchModelHubMixin):
     def __init__(
         self,
